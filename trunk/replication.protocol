@@ -1,0 +1,167 @@
+
+binlog  BINLOG
+    
+    packet       PACKET
+        
+        length       uint(3)
+        number       uint(1)
+        
+    body         PBODY(packet.length)
+        
+        marker       uint(1)
+        
+        content      CONTENT(auto){marker}
+            
+            254:eof        EOF
+            
+                warnings      uint(2)
+                status        byte[2]
+
+            255:error      ERROR(auto)
+            
+                code          uint(2)
+                reserved      char[1]
+                state         char[5]
+                message       char[auto]
+                
+            *:event        EVENT(auto)
+            
+                header        EVENT_HEADER
+            
+                    timestamp             uint(4)
+                    typecode              uint(1)
+                    server_id             uint(4)
+                    event_length          uint(4)
+                    next_position         uint(4)
+                    flags                 byte[2]
+                    extra_headers         byte[$extra_headers_length]
+                    
+                data          EVENT_DATA(auto){header.typecode}
+                    
+                    # http://forge.mysql.org/w/index.php?title=MySQL_Internals_Binary_Log&printable=yes
+                    
+                    # ROTATE_EVENT        4
+                    # TABLE_MAP_EVENT     19
+                    # WRITE_ROWS_EVENT    23
+                    # UPDATE_ROWS_EVENT   24
+                    # DELETE_ROWS_EVENT   25
+                    
+                    0:unkown              byte[auto]
+                    1:start_v3            byte[auto]
+                    2:query               EVENT_DATA_QUERY(auto)
+                    
+                        thread_id         uint(4)
+                        exec_time         uint(4)
+                        db_name_len       uint
+                        err_code          uint(2)
+                        
+                        # just needed for 5.0 after
+                        moreflags_len     uint(2)
+                        moreflags         byte[moreflags_len]
+                        
+                        db_name           char[db_name_len]
+                        terminator        byte
+                        query             char[auto]
+                        
+                        
+                    # stop event is empty event
+                    3:stop                byte[auto]
+                    
+                    4:rotate              EVENT_ROTATE(auto)
+                        position              uint(8)
+                        binlog                char[auto]
+                    
+                    5:intvar              EVENT_INTVAR(auto)
+                        type                  uint
+                        value                 uint(8)
+                        
+                    6:load                byte[auto]
+                    7:slave               byte[auto]
+                    8:create_file         byte[auto]
+                    9:append_block        byte[auto]
+                    10:exec_load          byte[auto]
+                    11:delete_file        byte[auto]
+                    12:new_load           byte[auto]
+                    13:rand               byte[auto]
+                    14:user_var           byte[auto]
+                    
+                    15:desciption         EVENT_DATA_DESCRIPTION(auto)
+                    
+                        binlog_version        uint(2)
+                        server_version        char[50]
+                        create_timestamp      uint(4)
+                        header_length         uint(1)
+                        post_header           byte[auto]
+                    
+                    16:xid                uint(8)
+                    
+                    17:begin_load_query   byte[auto]
+                    18:execute_load_query byte[auto]
+                    
+                    19:table              EVENT_DATA_TABLE
+                        
+                        table_id              uint(6)
+                        reserved              byte[2]
+                        
+                        dbname_length         uint(1)
+                        dbname                char[dbname_length]
+                        terminator1           byte
+                        tablename_length      uint(1)
+                        tablename             char[tablename_length]
+                        terminator2           byte
+                        columns_count         packint
+                        columns_type          uint[columns_count]
+                        metadata_length       packint
+                        #metadata              byte[metadata_length]
+                        metadata              metadata(metadata_length){columns_type}
+                        nullable              bit[columns_count]
+                    
+                    20:pre_ga_write_rows  byte[auto]
+                    21:pre_ga_update_rows byte[auto]
+                    22:pre_ga_delete_rows byte[auto]
+                    
+                    23:write_rows         EVENT_DATA_WRITE(auto)
+                        
+                        table_id              uint(6)
+                        m_flags               byte[2]
+                        
+                        columns_count         packint
+                        bitmap                bit[columns_count]
+                        #isnull                bit[columns_count]
+                        #value                 rowvalue[columns_count]{$coltype,isnull}
+                        #row_image             byte[auto]
+                        value                 rows(auto){columns_count,$coltype,$metadata,$tst,$idt,table_id}
+                    
+                    24:update_rows        EVENT_DATA_UPDATE(auto)
+
+                        table_id              uint(6)
+                        m_flags               byte[2]
+                        
+                        columns_count         packint
+                        bitmap                bit[columns_count]
+                        bitmap_ai             bit[columns_count]
+                        #row_image             byte[auto]
+                        #isnull                bit[columns_count]
+                        #value                 rowvalue[columns_count]{$coltype,isnull}
+                        #row_image             byte[auto]
+                        #isnull_ai             bit[columns_count]
+                        #value_ai              rowvalue[columns_count]{$coltype,isnull_ai}
+                        value                 rows(auto){columns_count,$coltype,$metadata,$tst,$idt,table_id}
+
+
+                    25:delete_rows        EVENT_DATA_DELETE(auto)
+                    
+                        table_id              uint(6)
+                        m_flags               byte[2]
+                        
+                        columns_count         packint
+                        bitmap                bit[columns_count]
+                        #isnull                bit[columns_count]
+                        #value                 rowvalue[columns_count]{$coltype,isnull}
+                        value                 rows(auto){columns_count,$coltype,$metadata,$tst,$idt,table_id}
+                    
+                    26:incident_evnet     byte[auto]
+                    27:heartbeat          byte[auto]
+                    
+                    *:undefined           byte[auto]
+
