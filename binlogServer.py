@@ -9,6 +9,12 @@ import m3easyrep
 from config import LOCAL_IDC as li
 from config import TEST_LOCATION
 from config import DB_CONFIG
+from config import CALLBACK_CONFIG
+
+from easyrep import UnknownTableDefine
+
+class ConnDisabled(Exception):
+    pass
 
 def getIP( s ):
     result = ''
@@ -25,9 +31,14 @@ def getIP( s ):
             raise
     result = set( [r[4][0] for r in result] )
     return list( result )
-    
+
 def combinDict( names, dicts ):
-    pass
+    combined = {}
+    for n, d in zip( names, dicts ):
+        if dicts:
+            for k, v in d.items():
+                combined['%s.%s' %( n, k )] = esql.formatvalue( v )
+    return combined
 
 class BinlogServer( object ):
     TABLE_FILTER = ( 'SinaStore', None )
@@ -112,10 +123,12 @@ class BinlogServer( object ):
 
         sourceDbConfig = self.getSourceDbConfig()
         sourceIPDict = self.getsourceIPDict()
+        print '*' * 20, sourceIPDict
         while True:
             preTime = ''
             while True:
                 markTime, sourceInfos = self.getSourceInfos( preTime, False )
+                print markTime, sourceInfos
                 # can not get time from annals
                 # but first time?
                 if not markTime:
@@ -193,12 +206,12 @@ class BinlogServer( object ):
         self.sourceConn = esql.Connection( self.sourceDbConfig )
         
     def reConnectLocalMasterDb( self ):
-        self.localMasterDbConfig = self.getLocalMasterDbConfig()
-        self.localMasterConn = esql.Connection( self.localMasterDbConfig )
+        localMasterDbConfig = self.getLocalMasterDbConfig()
+        self.localMasterConn = esql.Connection( localMasterDbConfig )
         
     def reConnectSourceMasterDb( self ):
-        self.sourceMasterDbConfig = self.getSourceMasterDbConfig()
-        self.sourceMasterConn = esql.Connection( self.sourceMasterDbConfig )
+        sourceMasterDbConfig = self.getSourceMasterDbConfig()
+        self.sourceMasterConn = esql.Connection( sourceMasterDbConfig )
 
     def verifyIDC( self ):
         if self.LOCAL_IDC != self.getLocalIDC():
@@ -213,14 +226,30 @@ class BinlogServer( object ):
 
     def processBinlog( self ):
         while True:
-            for binlong in self.erep.readloop():
-                self.duplicateToLocalMaster( binlong )
-                if self.reConnected:
-                    self.reConnected = False
-                    break
+            try:
+                for binlog in self.erep.readloop():
+                    self.duplicateToLocalMaster( binlog )
+                    if self.reConnected:
+                        self.reConnected = False
+                        break
+            # when parse binlog, the table's info is not in tablemata, do not process
+            except UnknownTableDefine:
+                print '[]' * 10, 'ignore'
+                continue
+            # some exceptions make the connection disabled, reconnect
+            except ConnDisabled:
+                # reconnect
+                while True:
+                    result = self.establishSourceConn( )
+                    if result:
+                        self.erep, self.sourceIP, self.sourceLocale = result
+                        break
+                    else:
+                        time.sleep( 3 )
 
-    def duplicateToLocalMaster( self, binlong ):
-        newLocation, tableName, newValues, oldValues = binlong
+    def duplicateToLocalMaster( self, binlog ):
+        print binlog
+        newLocation, tableName, newValues, oldValues = binlog
         if not tableName:
             return
         
@@ -249,6 +278,9 @@ class BinlogServer( object ):
         elif newValues and oldValues:
             if newValues[self.COL_ORIGO] == self.LOCAL_IDC:
                 if newValues[self.COL_MARK_DELETE] == 1:
+                    # mark delete success, do call back
+                    print 'call back\n'
+                    self.doCallback( 'delete', tableName, newValues, oldValues )
                     # real delete
                     self.doDelete( tableName, oldValues, self.localMasterConn )
                 else:
@@ -261,48 +293,17 @@ class BinlogServer( object ):
         else:
             pass
 
-    def doLocationLog( self, newLocation ):
-        logname, pos, tablest = newLocation
-        
-        data = {}
-        data['Time'] = self.logTimePoint
-        data['logname'] = logname
-        data['pos'] = pos
-        data['sourceip'] = self.sourceIP
-        
-        self.sourceMasterConn.put( self.POSITION_LOG_TABLE, data)
+    #def doLocationLog( self, newLocation ):
+    #    logname, pos, tablest = newLocation
+    #    
+    #    data = {}
+    #    data['Time'] = self.logTimePoint
+    #    data['logname'] = logname
+    #    data['pos'] = pos
+    #    data['sourceip'] = self.sourceIP
+    #    
+    #    self.sourceMasterConn.put( self.POSITION_LOG_TABLE, data)
 
-    def doHeartBeat( self, newLocation, datas ):
-        logname, position, tablest = newLocation
-        
-        annalData = {}
-        annalData['Time'] = datas['Time']
-        annalData['IP'] = self.sourceIP
-        annalData['File'] = logname
-        annalData['Offset'] = position
-        annalData['Uptime'] = self.getSourceDbUptime( self.erep )
-
-        tb  = ( self.DB_SINASTORE, self.TABLE_ANNALS )
-        try:
-            self.doInsert( tb, annalData, self.sourceMasterConn )
-        # duplicate key, when source from remote idc slave
-        except pymysql.err.IntegrityError, e:
-            # do update
-            self.doUpdate( tb, annalData, self.sourceMasterConn, False )
-        
-        tb  = ( self.DB_SINASTORE, self.TABLE_HEART_BEAT )
-        heartBeatData = {}
-        heartBeatData['Time'] = datas['Time']
-        heartBeatData['Bin'] = 1
-        self.doUpdate( tb, heartBeatData, self.sourceMasterConn, False )
-
-        if self.sourceLocale == 'remote':
-            # reconnect
-            result = self.establishSourceConn( isReconnect = True )
-            if result:
-                self.erep, self.sourceIP, self.sourceLocale = result
-                self.reConnected = True
-        
     def compareIDCPRI( self, sourceIDC, localIDC ):
         sourceIDCPRI = self.IDC_PRI.get( sourceIDC, self.DEFAULT_IDC_PRI )
         localIDCPRI = self.IDC_PRI.get( localIDC, self.DEFAULT_IDC_PRI )
@@ -363,7 +364,63 @@ class BinlogServer( object ):
         condition.append( (self.COL_MARK_DELETE, '=', 1) )
         
         conn.delete( tb, condition )
+
+    def doHeartBeat( self, newLocation, datas ):
+        logname, position, tablest = newLocation
         
+        annalData = {}
+        annalData['Time'] = datas['Time']
+        annalData['IP'] = self.sourceIP
+        annalData['File'] = logname
+        annalData['Offset'] = position
+        annalData['Uptime'] = self.getSourceDbUptime( self.erep )
+
+        tb  = ( self.DB_SINASTORE, self.TABLE_ANNALS )
+        try:
+            self.doInsert( tb, annalData, self.sourceMasterConn )
+        # duplicate key, when source from remote idc slave
+        except pymysql.err.IntegrityError, e:
+            # do update
+            self.doUpdate( tb, annalData, self.sourceMasterConn, False )
+        
+        tb  = ( self.DB_SINASTORE, self.TABLE_HEART_BEAT )
+        heartBeatData = {}
+        heartBeatData['Time'] = datas['Time']
+        heartBeatData['Bin'] = 1
+        self.doUpdate( tb, heartBeatData, self.sourceMasterConn, False )
+
+        print self.sourceLocale
+        if self.sourceLocale == 'remote':
+            # reconnect
+            result = self.establishSourceConn( isReconnect = True )
+            if result:
+                self.erep, self.sourceIP, self.sourceLocale = result
+                self.reConnected = True
+                
+    def doCallback( self, act, tb, newValues, oldValues ):
+        config = CALLBACK_CONFIG.get( act, {} )
+        print config
+        if config:
+            print tb, config.keys()
+            if tb in config.keys():
+                print 'LL' * 20, 'enter call back'
+                try:
+                    db, sqlFormat = config[tb]
+                    con = esql.Connection( db )
+                    
+                    combinedDict = combinDict( ( 'new', 'old' ), ( newValues, oldValues ) )
+                    sql = sqlFormat %combinedDict
+                    print '|' * 30, sql
+    
+                    con.write( sql )
+                except Exception, e:
+                    import traceback
+                    traceback.print_exc()
+            else:
+                return
+        else:
+            return
+
     def getKeys( self, tb ):
         PRIKeys = []
         tableDesc = self.erep.getcols( tb )
