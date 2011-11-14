@@ -44,17 +44,24 @@ class M3EasyReplication( easyrep.EasyReplication ):
         tablest = {}
         tableKeys = {}
 
-        tableMeta = self.conn.gets( ( self.DB_SINASTORE, self.TABLE_TABLEMETA, ), order = ['Index'] )
-        for meta in tableMeta:
-            tb = (self.DB_SINASTORE, meta['Table'])
-            if meta['Key'] == 'PRI':
-                keyList = tableKeys.get( tb, [], )
-                keyList.append( meta['Field'] )
-                tableKeys[tb] = keyList
+        databases = self.conn.getdatabases()
+        for db in databases:
+            print db
+            try:
+                tableMeta = self.conn.gets( ( db, self.TABLE_TABLEMETA, ), order = ['Index'] )
+            except Exception:
+                continue
                 
-            metaList = tablest.get( tb, [] )
-            metaList.append( ( meta['Field'], easyrep.RowType.colparse(meta['Type']), ) )
-            tablest[tb] = metaList
+            for meta in tableMeta:
+                tb = (db, meta['Table'])
+                if meta['Key'] == 'PRI':
+                    keyList = tableKeys.get( tb, [], )
+                    keyList.append( meta['Field'] )
+                    tableKeys[tb] = keyList
+                    
+                metaList = tablest.get( tb, [] )
+                metaList.append( ( meta['Field'], easyrep.RowType.colparse(meta['Type']), ) )
+                tablest[tb] = metaList
                 
         for k, v in tablest.items():
             tablest[k] = zip(*v)
