@@ -2,6 +2,8 @@ import time
 import types
 import pymysql
 import socket
+import getopt
+import sys
 
 import easysqllite as esql
 import m3easyrep
@@ -16,14 +18,14 @@ from easyrep import UnknownTableDefine
 class ConnDisabled(Exception):
     pass
 
-def getIP( s ):
+def getIP( host ):
     result = ''
-    infos = s.split('.')
+    infos = host.split('.')
     if len( infos ) == 4 and False not in [info.isdigit() for info in infos]:
-        return s
+        return host
     else:
         try:
-            result = socket.getaddrinfo( s, 'http' )
+            result = socket.getaddrinfo( host, 'http' )
             #result = socket.gethostbyaddr(myaddr)
         except Exception, e:
             import traceback
@@ -49,7 +51,7 @@ class BinlogServer( object ):
     }
     DEFAULT_IDC_PRI = 9
     TABLE_HEART_BEAT = 'heartbeat'
-    TABLE_ANNALS = 'annals'
+    TABLE_ANNALS = 'annales'
     TABLE_CONFIG = 'config'
     COL_ORIGO = 'Origo'
     COL_MARK_DELETE = 'Mark-Delete'
@@ -60,6 +62,7 @@ class BinlogServer( object ):
     COL_FILE = 'File'
     COL_OFFSET = 'Offset'
     COL_UPTIME = 'Uptime'
+    COL_PORT = 'PORT'
     DB_SINASTORE = 'SinaStore'
     LOCAL_IDC = li
     
@@ -67,8 +70,8 @@ class BinlogServer( object ):
     POSITION_LOG_INTERVAL = 60
     POSITION_LOG_TABLE = 'POSITION_LOG'
 
-    def __init__( self ):
-
+    def __init__( self, log_location ):
+        
         localMasterDbConfig = self.getLocalMasterDbConfig()
         self.localMasterConn = esql.Connection( localMasterDbConfig )
         self.verifyIDC()
@@ -76,10 +79,18 @@ class BinlogServer( object ):
         sourceMasterDbConfig = self.getSourceMasterDbConfig()
         self.sourceMasterConn = esql.Connection( sourceMasterDbConfig )
         
-        self.erep, self.sourceIP, self.sourceLocale = self.establishSourceConn( )
+        result = self.establishSourceConn( log_location = log_location )
+        if result:
+            self.erep, self.sourceIP, self.sourcePort, self.sourceLocale = result
+        else:
+            print 'can not establish source binlog connection.'
+            exit()
+        #if not self.
         self.table_keys = self.erep.tableKeys
         
         self.reConnected = False
+        self.log = None
+        self.offset = None
         
     def getSourceDbConfig( self ):
         return DB_CONFIG[self.LOCAL_IDC]['source']
@@ -90,82 +101,140 @@ class BinlogServer( object ):
     def getLocalMasterDbConfig( self ):
         return DB_CONFIG[self.LOCAL_IDC]['localMaster']
         
-    def getSourceConn( self, sourceIPDict, sourceDbConfig, sourceInfos, localOnly = False ):
+    def getSourceConn( self, sourceIPDict, sourceDbConfig, sourceAnnals, log_location = None, localOnly = False ):
+        
+        if log_location:
+            ip, port, log, offset = log_location
+            if ip and port and log and offset:
+                locale = None
+                hosts = []
+                for k, v in sourceIPDict.items():
+                    for _host, ipList in v.items():
+                        if ip in ipList:
+                            locale = k
+                            hosts.append( _host )
+                            break
+                    if locale:
+                        break
+                
+                dbConfig = None
+                if locale:
+                    dbConfigs = sourceDbConfig[locale]
+                    for _dbConfig in dbConfigs:
+                        if _dbConfig['host'] in hosts:
+                            dbConfig = dict( _dbConfig )
+                            if port != dbConfig['port']:
+                                print '+' * 20, port, dbConfig['port']
+                                dbConfig = None
+                                continue
+                            break
+                else:
+                    print 'can not init form the ip : %s' %ip
+                    exit()
+                    
+                if not dbConfig:
+                    print 'can not init form the given ip : %s' %ip
+                    exit()
+                    
+                dbConfig['host'] = ip
+                binlogLocation = ( log, offset )
+
+                erep = None
+                try:
+                    erep = m3easyrep.M3EasyReplication( dbConfig, binlogLocation, self.TABLE_FILTER )
+                    print 'x-x' * 10, binlogLocation
+                except Exception:
+                    print 'can not init by given ip,log and offset.'
+                    exit()
+                return ( erep, ip, port, locale )
         
         localPRI = ['local', 'remote']
         if localOnly:
             localPRI = ['local']
         
         for locale in localPRI:
-            ipList = sourceIPDict[locale]
-            dbConfig = dict( sourceDbConfig[locale] )
-            for ip in ipList:
-                if ip not in sourceInfos.keys():
-                    continue
-                dbConfig['host'] = ip
-                binlogLocation = self.getBinlogLocation( sourceInfos, ip )
-                erep = None
-                try:
-                    erep = m3easyrep.M3EasyReplication( dbConfig, binlogLocation, self.TABLE_FILTER )
-                except Exception:
-                    import traceback
-                    traceback.print_exc()
-                    
-                if erep:
-                    uptimeNow = self.getSourceDbUptime( erep )
-                    uptimeAnnal = sourceInfos[ip][self.COL_UPTIME]
-                    if uptimeNow >= uptimeAnnal:
-                        return ( erep, ip, locale )
+            #sourceIPInfos = sourceIPDict.get( locale, [] )
+            
+            for _dbConfig in sourceDbConfig[locale]:
+                dbConfig = dict( _dbConfig )
+                host = _dbConfig['host']
+                ipList = sourceIPDict[locale].get( host, [] )
+                for ip in ipList:
+                    if ip not in sourceAnnals.keys():
+                        continue
+                    if dbConfig['port'] != sourceAnnals[ip].get( self.COL_PORT, '' ):
+                        print dbConfig['port'], sourceAnnals[ip].get( 'PORT', '' )
+                        continue
+                    dbConfig['host'] = ip
+                    binlogLocation = self.getBinlogLocation( sourceAnnals, ip )
+                    erep = None
+                    try:
+                        erep = m3easyrep.M3EasyReplication( dbConfig, binlogLocation, self.TABLE_FILTER )
+                        print 'x-x' * 10, binlogLocation
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
 
-        return ( None, None, None )
+                    if erep:
+                        uptimeNow = self.getSourceDbUptime( erep )
+                        uptimeAnnal = sourceAnnals[ip][self.COL_UPTIME]
+                        if uptimeNow >= uptimeAnnal:
+                            return ( erep, ip, dbConfig['port'], locale )
 
-    def establishSourceConn( self, isReconnect = False ):
+        return ( None, None, None, None )
+
+    def establishSourceConn( self, log_location = None, isReconnect = False, preTime = '' ):
 
         sourceDbConfig = self.getSourceDbConfig()
         sourceIPDict = self.getsourceIPDict()
         print '*' * 20, sourceIPDict
         while True:
-            preTime = ''
             while True:
-                markTime, sourceInfos = self.getSourceInfos( preTime, False )
-                print markTime, sourceInfos
+                # get annals from database
+                markTime, sourceInfos = self.getSourceInfos( preTime, isReconnect, False )
+                print '()', markTime, sourceInfos
                 # can not get time from annals
                 # but first time?
                 if not markTime:
                     break
                 
-                erep, sourceIP, sourceLocale = self.getSourceConn( sourceIPDict, sourceDbConfig, sourceInfos, isReconnect )
+                erep, sourceIP, sourcePort, sourceLocale = self.getSourceConn( sourceIPDict, sourceDbConfig, sourceInfos, log_location, isReconnect )
                 # can not establish connection from source ip list
                 if not erep:
                     preTime = markTime
                 else:
-                    return ( erep, sourceIP, sourceLocale )
+                    return ( erep, sourceIP, sourcePort, sourceLocale )
                     
+                # reconnect just for given preTime annals
                 if isReconnect:
                     break
                     
             newsourceIPDict = self.getsourceIPDict()
             if newsourceIPDict == sourceIPDict:
                 if isReconnect:
-                    return False
+                    return None
                 else:
                     print 'can not init the source connection!'
-                    exit()
+                    return None
             else:
                 sourceIPDict = newsourceIPDict
 
     def getsourceIPDict( self ):
         sourceIPDict = {}
-        for k, v in DB_CONFIG[self.LOCAL_IDC]['source'].items():
-            try:
-                host = v['host']
-                sourceIPDict[k] = getIP( host )
-            # can not get ip from source slave's domain name
-            except Exception:
-                pass
+        for locale, dbList in DB_CONFIG[self.LOCAL_IDC]['source'].items():
+            localeIPDict = {}
+            for dbConfig in dbList:
+                try:
+                    host = dbConfig['host']
+                    localeIPDict[host] = getIP( host )
+                    
+                # can not get ip from source slave's domain name
+                except Exception:
+                    pass
+            sourceIPDict[locale] = localeIPDict
         return sourceIPDict
             
-    def getSourceInfos( self, preTime = '', test = True ):
+    def getSourceInfos( self, preTime = '', isReconnect = False, test = True ):
         
         if test:
             return TEST_LOCATION
@@ -173,7 +242,11 @@ class BinlogServer( object ):
             cols = [self.COL_TIME]
             wc = {self.COL_BIN : 1}
             if preTime:
-                wc[self.COL_TIME] = ( None, preTime )
+                # just for reconnect
+                if isReconnect:
+                    wc[self.COL_TIME] = preTime
+                else:
+                    wc[self.COL_TIME] = ( None, preTime )
             order = [ self.COL_TIME ]
             heartBeatInfos = self.sourceMasterConn.gets( (self.DB_SINASTORE, self.TABLE_HEART_BEAT), where = wc, order = order, reverse = True, limit = 1 )
     
@@ -237,19 +310,51 @@ class BinlogServer( object ):
                 print '[]' * 10, 'ignore'
                 continue
             # some exceptions make the connection disabled, reconnect
-            except ConnDisabled:
-                # reconnect
-                while True:
-                    result = self.establishSourceConn( )
-                    if result:
-                        self.erep, self.sourceIP, self.sourceLocale = result
-                        break
-                    else:
-                        time.sleep( 3 )
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                # first attempt to reconnect to same slave
+                retry = 0
+                result = None
+                while retry < 5:
+                    try:
+                        result = self.establishSourceConn( log_location = ( self.sourceIP, self.sourcePort, self.log, self.offset ) )
+                        if result:
+                            self.erep, self.sourceIP, self.sourcePort, self.sourceLocale = result
+                            break
+                        else:
+                            retry += 1
+                            time.sleep( 1 )
+                    except Exception, e:
+                        import traceback
+                        traceback.print_exc()
+                        retry += 1
+                        time.sleep( 1 )
+                        
+                if not result:
+                    retry = 0
+                    while retry < 5:
+                            try:
+                                result = self.establishSourceConn( )
+                                if result:
+                                    self.erep, self.sourceIP, self.sourcePort, self.sourceLocale = result
+                                    break
+                                else:
+                                    retry += 1
+                                    print '~' * 100, 'sleep?'
+                                    time.sleep( 3 )
+                            except Exception, e:
+                                import traceback
+                                traceback.print_exc()
+                                retry += 1
+                                time.sleep( 3 )
 
     def duplicateToLocalMaster( self, binlog ):
         print binlog
         newLocation, tableName, newValues, oldValues = binlog
+
+        if newLocation:
+            self.log, self.offset = newLocation[:2]
         if not tableName:
             return
         
@@ -272,19 +377,19 @@ class BinlogServer( object ):
         # insert
         if newValues and not oldValues:
             if newValues.get(self.COL_ORIGO, self.LOCAL_IDC) == self.LOCAL_IDC:
-                return
-            self.processInsert( tableName, newValues )
+                self.doCallback( 'insert', tableName, newValues, oldValues )
+            else:
+                self.processInsert( tableName, newValues )
         # update
         elif newValues and oldValues:
             if newValues[self.COL_ORIGO] == self.LOCAL_IDC:
                 if newValues[self.COL_MARK_DELETE] == 1:
                     # mark delete success, do call back
-                    print 'call back\n'
                     self.doCallback( 'delete', tableName, newValues, oldValues )
                     # real delete
                     self.doDelete( tableName, oldValues, self.localMasterConn )
                 else:
-                    return
+                    self.doCallback( 'update', tableName, newValues, oldValues )
             else:
                 self.processUpdate( tableName, newValues )
         # del
@@ -333,6 +438,7 @@ class BinlogServer( object ):
         affectRows = 0
         affectRows = self.doUpdate( tb, data, self.localMasterConn )
 
+        # if want to update, but the date is not exist , then insert 
         if affectRows == 0:
             try:
                 affectRows = self.doInsert( tb, data, self.localMasterConn )
@@ -371,6 +477,7 @@ class BinlogServer( object ):
         annalData = {}
         annalData['Time'] = datas['Time']
         annalData['IP'] = self.sourceIP
+        annalData['PORT'] = self.sourcePort
         annalData['File'] = logname
         annalData['Offset'] = position
         annalData['Uptime'] = self.getSourceDbUptime( self.erep )
@@ -392,21 +499,34 @@ class BinlogServer( object ):
         print self.sourceLocale
         if self.sourceLocale == 'remote':
             # reconnect
-            result = self.establishSourceConn( isReconnect = True )
+            result = self.establishSourceConn( isReconnect = True, preTime = heartBeatData['Time'] )
             if result:
-                self.erep, self.sourceIP, self.sourceLocale = result
+                print '~' * 20, 'reconnect succ'
+                self.erep, self.sourceIP, self.sourcePort, self.sourceLocale = result
                 self.reConnected = True
+            else:
+                print '~' * 20, 'reconnect failed'
                 
     def doCallback( self, act, tb, newValues, oldValues ):
         config = CALLBACK_CONFIG.get( act, {} )
-        print config
+        #print 'do call back', config
         if config:
-            print tb, config.keys()
+            #print tb, config.keys()
             if tb in config.keys():
-                print 'LL' * 20, 'enter call back'
+                #print 'LL' * 20, 'enter call back'
                 try:
                     db, sqlFormat = config[tb]
-                    con = esql.Connection( db )
+                    con = None
+                    if db == 'source':
+                        con = self.sourceMasterConn
+                    elif db == 'local':
+                        con = self.localMasterConn
+                    else:
+                        try:
+                            con = esql.Connection( db )
+                        except Exception, e:
+                            print 'can init callback conn!'
+                            raise
                     
                     combinedDict = combinDict( ( 'new', 'old' ), ( newValues, oldValues ) )
                     sql = sqlFormat %combinedDict
@@ -432,7 +552,38 @@ class BinlogServer( object ):
     def getSourceDbUptime( self, sourceConn ):
         result = sourceConn.getUptime()
         return result[0]['Value']
+        
+def help( n ):
+    print ''
     
 if __name__ == '__main__':
-    bs = BinlogServer()
+    opts, args = ( None, None )
+    try:
+        opts, args = getopt.getopt(sys.argv[1:],'hi:l:o:p:')
+    except getopt.GetoptError:
+        help(1)
+        
+    ip, port, log, offset = ( None, None, None, None )
+    for o,a in opts:
+        if o == '-h':
+            help(2)
+        if o == '-i':
+            ip = a.strip()
+        if o == '-p':
+            try:
+                port = int( a.strip() )
+            except Exception, e:
+                print 'port : %s can not converto int' %port
+                exit()
+        if o == '-l':
+            log = a.strip()
+        if o == '-o':
+            try:
+                offset = int( a.strip() )
+            except Exception, e:
+                print 'offset : %s can not converto int' %offset
+                exit()
+    
+    print ip, log, offset
+    bs = BinlogServer( ( ip, port, log, offset ) )
     bs.processBinlog()
