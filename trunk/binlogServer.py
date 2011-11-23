@@ -12,6 +12,7 @@ from config import LOCAL_IDC as li
 from config import TEST_LOCATION
 from config import DB_CONFIG
 from config import CALLBACK_CONFIG
+from config import TRACE_BACK_TIME
 
 from easyrep import UnknownTableDefine
 
@@ -37,7 +38,7 @@ def getIP( host ):
 def combinDict( names, dicts ):
     combined = {}
     for n, d in zip( names, dicts ):
-        if dicts:
+        if d:
             for k, v in d.items():
                 combined['%s.%s' %( n, k )] = esql.formatvalue( v )
     return combined
@@ -66,9 +67,9 @@ class BinlogServer( object ):
     DB_SINASTORE = 'SinaStore'
     LOCAL_IDC = li
     
-    # log the local binlog postion to master database
-    POSITION_LOG_INTERVAL = 60
-    POSITION_LOG_TABLE = 'POSITION_LOG'
+    ## log the local binlog postion to master database
+    #POSITION_LOG_INTERVAL = 60
+    #POSITION_LOG_TABLE = 'POSITION_LOG'
 
     def __init__( self, log_location ):
         
@@ -188,15 +189,25 @@ class BinlogServer( object ):
         sourceDbConfig = self.getSourceDbConfig()
         sourceIPDict = self.getsourceIPDict()
         print '*' * 20, sourceIPDict
+        
+        now = int( time.time() )
         while True:
             while True:
-                # get annals from database
-                markTime, sourceInfos = self.getSourceInfos( preTime, isReconnect, False )
-                print '()', markTime, sourceInfos
-                # can not get time from annals
-                # but first time?
-                if not markTime:
-                    break
+                markTime, sourceInfos = ( None, None )
+
+                # you must given all args in log_location
+                if not log_location or None in log_location:
+                    # get annals from database
+                    markTime, sourceInfos = self.getSourceInfos( preTime, isReconnect, False )
+                    print '()', markTime, sourceInfos
+                    # can not get time from annals and no location given, then exception
+                    if not markTime:
+                        break
+                    else:
+                        iMarkTime = time.mktime(time.strptime(markTime,'%Y-%m-%d %H:%M:%S'))
+                        if now - iMarkTime > TRACE_BACK_TIME:
+                            print 'mark time over max TRACE_BACK_TIME'
+                            break
                 
                 erep, sourceIP, sourcePort, sourceLocale = self.getSourceConn( sourceIPDict, sourceDbConfig, sourceInfos, log_location, isReconnect )
                 # can not establish connection from source ip list
@@ -257,7 +268,7 @@ class BinlogServer( object ):
                 result = {}
                 for annal in annals:
                     result[annal[self.COL_IP]] = annal
-                return ( t, result )
+                return ( t.strftime('%Y-%m-%d %H:%M:%S'), result )
             
             else:
                 return ( None, None )
@@ -363,7 +374,7 @@ class BinlogServer( object ):
             return
         
         if tableName == ( self.DB_SINASTORE, self.TABLE_HEART_BEAT ):
-            if newValues[self.COL_BIN] == 0:
+            if newValues and not oldValues and newValues[self.COL_BIN] == 0:
                 while True:
                     try:
                         self.doHeartBeat( newLocation, newValues )
@@ -371,6 +382,7 @@ class BinlogServer( object ):
                     except Exception:
                         import traceback
                         traceback.print_exc()
+                        raise
             else:
                 return
         
@@ -529,7 +541,14 @@ class BinlogServer( object ):
                             raise
                     
                     combinedDict = combinDict( ( 'new', 'old' ), ( newValues, oldValues ) )
+                    combinedDict['ACT'] = esql.formatvalue( act )
+                    combinedDict['TABLE'] = esql.formatvalue( tb ) if type( tb ) in types.StringTypes else esql.formatvalue( '.'.join(tb) )
+                    
+                    import pprint
+                    pprint.pprint( combinedDict )
+
                     sql = sqlFormat %combinedDict
+                    sql = sql
                     print '|' * 30, sql
     
                     con.write( sql )

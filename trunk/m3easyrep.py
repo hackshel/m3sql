@@ -2,6 +2,7 @@ import pymysql
 import easyrep
 import types
 import easysqllite as esql
+import easyprotocol as ezp
 
 class M3EasyReplication( easyrep.EasyReplication ):
     com_binlog_dump = 18
@@ -39,6 +40,132 @@ class M3EasyReplication( easyrep.EasyReplication ):
         
     def querybinlog( self, ):
         self.conn.querybinlog( self.pos, self.serverid, self.logname, self.com_binlog_dump )
+        
+    def readloop( self, onconn=None, evyield=False ):
+        
+        #arg = struct.pack('<LHLs',self.pos,0,self.serverid,self.logname)
+        
+        #if (self.logname == None and self.pos == None) or self.tablest == None :
+        #    for r in self.firstdump():
+        #        yield r
+        
+        self.querybinlog()
+        if onconn != None :
+            onconn(self.conn, self.logname, self.pos, self.tablest)
+            
+        coltype = ()
+        metadata = ()
+        idt = {}
+        
+        self.run_pos = self.pos
+        
+        while(True):
+            
+            if evyield :
+                yield EventWait
+            
+            try :
+                r = self.ebp.read( 'binlog', self.conn.conn.socket.makefile(), 
+                                         extra_headers_length=0,
+                                         coltype=coltype, 
+                                         metadata=metadata,
+                                         tst = self.tablest, idt=idt )
+            except ezp.ConnectionError, e:
+                self.conn = pymysql.connect( **self.dbarg )
+                self.querybinlog()
+                if onconn != None :
+                    onconn(self.conn, self.logname, self.pos, self.tablest)
+                continue
+            
+            try :
+                self.run_pos = r['body']['content']['event']['header']['next_position']
+            except :
+                pass
+            
+            try :
+                if 'error' in r['body']['content'] :
+                    err = r['body']['content']['error']
+                    raise MySQLBinLogError, (err['state'],err['code'],err['message'])
+            except KeyError, e :
+                pass
+            
+            try :
+                coltype = r['body']['content']['event']['data']['table']['columns_type']
+                metadata = r['body']['content']['event']['data']['table']['metadata']
+                idt[r['body']['content']['event']['data']['table']['table_id']] = \
+                    (r['body']['content']['event']['data']['table']['dbname'],
+                     r['body']['content']['event']['data']['table']['tablename'])
+            except KeyError, e :
+                pass
+            
+            try :
+                rot = r['body']['content']['event']['data']['rotate']
+                self.logname, self.pos = rot['binlog'], rot['position']
+                yield (self.logname, self.pos, self.tablest), None, None, None
+                continue
+            except KeyError, e :
+                pass
+            
+            try :
+                op, d = r['body']['content']['event']['data'].items()[0]
+            except KeyError, e :
+                yield None, None, None, None
+                continue
+            
+            if op == 'query':
+                
+                _q = d['query'].strip().split()
+                qtype = [ q.lower() for q in _q[:2] ]
+                if q == ['create','table'] :
+                    table = [ x.strip('`') for x in _q[3].split('.',1)]
+                    table = [dbname] + table if dbname else table  
+                    yield None, table[0], self.stablest, None
+                elif q == ['alter','table'] :
+                    table = [ x.strip('`') for x in _q[3].split('.',1)]
+                    table = [dbname] + table if dbname else table  
+                    yield None, table[0], self.stablest, None
+                else :
+                    yield None, None, None, None
+                continue
+            
+            if op not in ('write_rows','update_rows','delete_rows') :
+                yield None, None, None, None
+                continue
+                
+            self.pos = r['body']['content']['event']['header']['next_position']
+            t = idt[d['table_id']]
+            
+            if not self.tablefilter(t) :
+                yield None, None, None, None
+                continue
+            
+            if op == 'write_rows' :
+                
+                for x in d['value'][:-1] :
+                    yield None, t, x, None
+            
+                yield (self.logname, self.pos, self.tablest), t, d['value'][-1], None
+            
+            elif op == 'update_rows' :
+                
+                v = zip( d['value'][::2], d['value'][1::2] )
+                for b, a in v[:-1] :
+                    yield None, t, a, b
+                    
+                yield (self.logname, self.pos, self.tablest), t, v[-1][1], v[-1][0]
+                
+            elif op == 'delete_rows' :
+                
+                for x in d['value'][:-1] :
+                    yield None, t, x, None
+            
+                yield (self.logname, self.pos, self.tablest), t, None, d['value'][-1]
+                
+            else :
+                
+                yield None, None, None, None
+        
+        return
 
     def getTableMeta( self, ):
         tablest = {}
