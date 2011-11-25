@@ -4,6 +4,8 @@ import types
 import easysqllite as esql
 import easyprotocol as ezp
 
+from easyrep import MySQLBinLogError
+
 class M3EasyReplication( easyrep.EasyReplication ):
     com_binlog_dump = 18
     DB_SINASTORE = 'SinaStore'
