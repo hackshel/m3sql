@@ -120,8 +120,8 @@ class RowType( ezp.ProtocolType ):
         
         raise Exception, 'float read error'
         
-    @staticmethod
-    def colparse( t ):
+    
+    def colparse( self, t ):
         
         if t.startswith('int'):
             return t.endswith('unsigned')
@@ -148,10 +148,10 @@ class RowType( ezp.ProtocolType ):
         columns_count, coltypes, metadatas, tst, idt, tid = args
         
         tname = idt.get(tid, None)
-
+        
         if tname == None :
             raise Exception, ('table id error', tid)
-            
+        
         if self.tablefilter and not self.tablefilter(tname) :
             return x, lens
         
@@ -390,7 +390,7 @@ class METADATAType( ezp.ProtocolType ):
                 _r, l = self.readint(x,l,2)
                 rr.append( 2 if _r >= 256 else 1 )
             elif coltype == 254 : # binary / char
-                _r, l = self.readint(x,l,2,True)
+                _r, l = self.readint(x,l,2)
                 rr.append( 1 if _r >= 65024 else 2 )
             else :
                 raise UnknownColumnType, ('unkown column type',coltype)
@@ -447,7 +447,7 @@ class EasyReplication(object):
         self.run_pos = None
         
     def executesql( self, query ):
-
+        
         cur = self.conn.cursor()
         cur.execute( query )
         dsc = cur.description
@@ -778,7 +778,7 @@ class EasyReplication(object):
             elif op == 'delete_rows' :
                 
                 for x in d['value'][:-1] :
-                    yield None, t, x, None
+                    yield None, t, None, x
             
                 yield (self.logname, self.pos, self.tablest), t, None, d['value'][-1]
                 
@@ -800,10 +800,11 @@ if __name__ == '__main__':
            'user' : 'repl',
          }
 
-    erep = EasyReplication( db, ('mysql-bin.000002', 21345, None) )
+    erep = EasyReplication( db, ('mysql-bin.000002', 18724, None) )
     
     #erep = EasyReplication( db, None, tablefilter=( lambda x: ( x[0] == 'test' ) ), dbfilter=( lambda x: ( x != 'log' ) ) )
     
     for i in erep.readloop():
         pprint.pprint(i)
         print
+        
