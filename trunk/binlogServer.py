@@ -364,7 +364,9 @@ class BinlogServer( object ):
                         result = self.establishSourceConn( )
                     except SlaveConnDisabled:
                         retry += 1
-                        time.sleep( 1 )
+                        time.sleep(1)
+                        if retry > self.MAX_RETRY:
+                            pass
                     else:
                         self.erep, self.sourceIP, self.sourcePort, self.sourceLocale, binlogLocation = result
                         self.log, self.offset = binlogLocation
