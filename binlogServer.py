@@ -5,6 +5,7 @@ import socket
 import getopt
 import sys
 import traceback
+import threading
 
 import easysqllite as esql
 import m3easyrep
@@ -47,6 +48,10 @@ def combinDict( names, dicts ):
                 combined['%s.%s' %( n, k )] = esql.formatvalue( v )
     return combined
 
+class slaveWatcher( threading.Thread ):
+    def __init__(self, conn ):
+        pass
+
 class BinlogServer( object ):
     TABLE_FILTER = ( 'SinaStore', None )
     IDC_PRI = {
@@ -56,7 +61,7 @@ class BinlogServer( object ):
     }
     DEFAULT_IDC_PRI = 9
     TABLE_HEART_BEAT = 'heartbeat'
-    TABLE_ANNALS = 'annales'
+    TABLE_ANNALS = 'annalss'
     TABLE_CONFIG = 'config'
     COL_ORIGO = 'Origo'
     COL_MARK_DELETE = 'Mark-Delete'
@@ -91,7 +96,7 @@ class BinlogServer( object ):
             self.sourceMasterConn = esql.Connection( sourceMasterDbConfig )
         except Exception:
             traceback.print_exc()
-            print("can init local master's connection")
+            print("can init source master's connection")
             exit(1)
 
         try:
@@ -102,6 +107,7 @@ class BinlogServer( object ):
             print("can init local source slave's connection")
             exit(1)
         
+        self.tablest = self.erep.tablest
         self.table_keys = self.erep.tableKeys
         self.reConnected = False
         self.MAX_RETRY = 3
@@ -136,7 +142,6 @@ class BinlogServer( object ):
                     if _dbConfig['host'] in hosts:
                         dbConfig = dict( _dbConfig )
                         if port != dbConfig['port']:
-                            print '+' * 20, port, dbConfig['port']
                             dbConfig = None
                             continue
                         break
@@ -180,8 +185,8 @@ class BinlogServer( object ):
                 for ip in ipList:
                     if ip not in sourceAnnals.keys():
                         continue
-                    if dbConfig['port'] != sourceAnnals[ip].get( self.COL_PORT, '' ):
-                        print dbConfig['port'], sourceAnnals[ip].get( 'PORT', '' )
+                    if str( dbConfig['port'] ) != sourceAnnals[ip].get( self.COL_PORT, '' ):
+                        print dbConfig['port'], type(dbConfig['port']), sourceAnnals[ip].get( 'PORT', '' ), type(sourceAnnals[ip].get( 'PORT', '' ))
                         continue
                     dbConfig['host'] = ip
                     binlogLocation = self.getBinlogLocation( sourceAnnals, ip )
@@ -336,12 +341,13 @@ class BinlogServer( object ):
                     # just raise SlaveConnDisabled
                     self.duplicateToLocalMaster( binlog )
             # when parse binlog, the table's info is not in tablemata, do not process
-            except UnknownTableDefine:
-                print '[]' * 10, 'ignore'
+            except UnknownTableDefine, e:
+                print '[]' * 10, 'no table defin, ignore', str(e)
                 continue
             # some exceptions make the connection disabled, reconnect
             # only slave exception was raised
-            except pymysql.OperationalError, e:
+            #except pymysql.OperationalError, e:
+            except socket.error, e:
                 traceback.print_exc()
                 # first attempt to reconnect to same slave
                 retry = 0
@@ -438,6 +444,7 @@ class BinlogServer( object ):
         sourceIDCPRI = self.IDC_PRI.get( sourceIDC, self.DEFAULT_IDC_PRI )
         localIDCPRI = self.IDC_PRI.get( localIDC, self.DEFAULT_IDC_PRI )
 
+        # the lower the precedence
         if sourceIDCPRI < localIDCPRI:
             return True
         elif sourceIDCPRI > localIDCPRI:
@@ -490,7 +497,9 @@ class BinlogServer( object ):
                             pass
 
             except pymysql.ProgrammingError, e :
-                e.args = tuple( list(e.args)+[sql,] )
+                import traceback
+                traceback.print_exc()
+                e.args = tuple( list(e.args))
                 raise
 
     def doUpdate( self, tb, data, conn, extCondition = True ):
@@ -501,11 +510,23 @@ class BinlogServer( object ):
         
         condition = [(k, '=', v) for k, v in data.items() if k in PRIKeys]
         if extCondition:
-            condition.append( (self.COL_LAST_MODIFY, self.getComparison( data[self.COL_ORIGO] ), esql.formatvalue( data[self.COL_LAST_MODIFY]) ) )
+            condition = [y for x in zip(condition, ['and'] * len(condition)) for y in x]
+            #condition.append( (self.COL_LAST_MODIFY, self.getComparison( data[self.COL_ORIGO] ), data[self.COL_LAST_MODIFY]) )
+            tmp_condition = []
+            tmp_condition.append( (self.COL_LAST_MODIFY, '=', data[self.COL_LAST_MODIFY]) )
+            tmp_condition.append('and')
+            tmp_condition.append( (self.COL_ORIGO, '>=', data[self.COL_ORIGO]) )
+            
+            tmp_condition1 = []
+            tmp_condition1.append( (self.COL_LAST_MODIFY, '<', data[self.COL_LAST_MODIFY]) )
+            tmp_condition1.append('or')
+            tmp_condition1.append(tmp_condition)
+            
+            condition.append(tmp_condition1)
         
         while True:
             try:
-                return conn.update( tb, data, condition )
+                return conn.update( tb, data, condition, extCondition )
             except pymysql.OperationalError, e:
                 retry = 0
                 while True:
@@ -520,7 +541,9 @@ class BinlogServer( object ):
                             pass
 
             except pymysql.ProgrammingError, e :
-                e.args = tuple( list(e.args)+[sql,] )
+                import traceback
+                traceback.print_exc()
+                e.args = tuple( list(e.args))
                 raise
 
     def doDelete( self, tb, data, conn ):
@@ -610,6 +633,15 @@ class BinlogServer( object ):
                         except Exception, e:
                             print 'can init callback conn!'
                             raise
+                        
+                    PRIKeys = self.table_keys.get( tb, None )
+                    if PRIKeys == None:
+                        PRIKeys = self.getKeys( tb )
+                        self.table_keys[tb] = PRIKeys
+                    if newValues:
+                        newValues['ALL_KEYS'] = '|'.join([esql.formatvalue( newValues.get(k) ) for k in PRIKeys])
+                    if oldValues:
+                        oldValues['ALL_KEYS'] = '|'.join([esql.formatvalue( oldValues.get(k) ) for k in PRIKeys])
                     
                     combinedDict = combinDict( ( 'new', 'old' ), ( newValues, oldValues ) )
                     combinedDict['ACT'] = esql.formatvalue( act )
@@ -626,6 +658,7 @@ class BinlogServer( object ):
                 except Exception, e:
                     import traceback
                     traceback.print_exc()
+                    raise
             else:
                 return
         else:
