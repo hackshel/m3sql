@@ -35,7 +35,8 @@ COL_UPTIME = 'Uptime'
 COL_PORT = 'PORT'
 DB_SINASTORE = 'SinaStore'
 QUEUE_LENGTH = 500
-SQL_EXE_THREAD_CNT = 10
+SQL_EXE_THREAD_CNT = 15
+MAX_RETRY = 3
 
 class SlaveConnDisabled(Exception):
     pass
@@ -76,7 +77,8 @@ class BinlogServer( object ):
     ## log the local binlog postion to master database
     #POSITION_LOG_INTERVAL = 60
     #POSITION_LOG_TABLE = 'POSITION_LOG'
-
+    preHeartBeat = False
+    
     def __init__( self, log_location ):
 
         sourceMasterDbConfig = dbProcessor.getSourceMasterDbConfig()
@@ -100,6 +102,9 @@ class BinlogServer( object ):
         self.binlog_queue = Queue.Queue( QUEUE_LENGTH )
         self.reConnected = False
         self.MAX_RETRY = 3
+        self.binlog_cnt = 0
+        self._end = 0
+        self._start = 0
         
         self.sql_exe_thread_list = []
         for i in xrange( SQL_EXE_THREAD_CNT ):
@@ -107,8 +112,6 @@ class BinlogServer( object ):
             self.sql_exe_thread_list.append( t )
             t.setDaemon( True )
             t.start()
-
-
 
     def getSourceConnByArgs( self, sourceIPDict, sourceDbConfig, log_location ):
         ip, port, log, offset = log_location
@@ -313,10 +316,14 @@ class BinlogServer( object ):
 
     def processBinlog( self ):
         while True:
+            self.reConnected = False
             try:
                 for binlog in self.erep.readloop():
                     # just raise SlaveConnDisabled
                     self.duplicateToLocalMaster( binlog )
+                    
+                    if self.reConnected:
+                        break
             # when parse binlog, the table's info is not in tablemata, do not process
             except UnknownTableDefine, e:
                 print '[]' * 10, 'no table defin, ignore', str(e)
@@ -358,28 +365,45 @@ class BinlogServer( object ):
     def duplicateToLocalMaster( self, binlog ):
         #print binlog
         newLocation, tableName, newValues, oldValues = binlog
+        
+        if not tableName or tableName == ( DB_SINASTORE, TABLE_ANNALS ):
+            return
 
         if tableName == ( DB_SINASTORE, TABLE_HEART_BEAT ):
             if newValues and not oldValues and newValues[COL_BIN] == 0:
+                
+                self._end = time.time()
+                print '*-* ' * 20
+                print 'elapse : %s' %(self._end - self._start)
+                print '*-* ' * 20
+
                 # maybe the self.log, self.offset is useless
                 if newLocation:
                     self.log, self.offset = newLocation[:2]
+                while binlogProcessor.processed_cnt < self.binlog_cnt:
+                    print 'processed_cnt : %s, binlog_cnt : %s' %(binlogProcessor.processed_cnt, self.binlog_cnt)
+                    time.sleep(1)
+                else:
+                    print 'processed_cnt : %s, binlog_cnt : %s' %(binlogProcessor.processed_cnt, self.binlog_cnt)
+                    binlogProcessor.lock.acquire()
+                    binlogProcessor.processed_cnt = 0
+                    self.binlog_cnt = 0
+                    binlogProcessor.lock.release()
+
                 while True:
                     try:
-                        import pprint
-                        pprint.pprint(binlog)
                         self.doHeartBeat( newLocation, newValues )
                         return
                     except Exception:
                         import traceback
                         traceback.print_exc()
-                        raise
+                        #raise
             else:
                 return
         
         self.binlog_queue.put( binlog )
-        print 'queuesize : %s' %(self.binlog_queue.qsize())
-        print 'processing_cnt : %s' %binlogProcessor.processing_cnt
+        self.binlog_cnt += 1
+
     #def doLocationLog( self, newLocation ):
     #    logname, pos, tablest = newLocation
     #    
@@ -464,7 +488,7 @@ class BinlogServer( object ):
         
 class binlogProcessor( threading.Thread ):
     
-    processing_cnt = 0
+    processed_cnt = 0
     lock = threading.Lock()
     _start = 0
     _end = 0
@@ -491,34 +515,20 @@ class binlogProcessor( threading.Thread ):
     def run( self ):
         while not self.over:
 
-            self.lock.acquire()
             binlog = self.queue.get()
-            self.processing_cnt += 1
-            self.lock.release()
             newLocation, tableName, newValues, oldValues = binlog
-            
-            if not tableName:
-                continue
-            
-            # insert for timepoint to source database
-            if tableName == ( DB_SINASTORE, TABLE_ANNALS ):
-                continue
-            
-            offset = newLocation[1]
-            if offset >= 65571771 and self._start == 0:
-                self._start = time.time()
-            if offset >= 67941000 and self._end == 0:
-                self._end = time.time()
-                print '*-* ' * 20
-                print 'elapse : %s' %(self._end - self._start)
-                print '*-* ' * 20
+
+            if newLocation:
+                offset = newLocation[1]
+                if offset >= 130046693 and self._start == 0:
+                    self._start = time.time()
 
             # insert
             if newValues and not oldValues:
                 #if newValues.get(COL_ORIGO, LOCAL_IDC) == LOCAL_IDC:
                 if newValues[COL_ORIGO] == LOCAL_IDC:
-                    
-                    dbProcessor.doCallback( 'insert', tableName, newValues, oldValues, self.table_keys )
+                    #dbProcessor.doCallback( 'insert', tableName, newValues, oldValues, self.table_keys )
+                    pass
                 else:
                     dbProcessor.processInsert( tableName, newValues, self.table_keys, self.localMasterConn )
             # update
@@ -526,20 +536,21 @@ class binlogProcessor( threading.Thread ):
                 if newValues[COL_ORIGO] == LOCAL_IDC:
                     if newValues[COL_MARK_DELETE] == 1:
                         # mark delete success, do call back
-                        dbProcessor.doCallback( 'delete', tableName, newValues, oldValues, self.table_keys )
+                        #dbProcessor.doCallback( 'delete', tableName, newValues, oldValues, self.table_keys )
                         # real delete
                         dbProcessor.doDelete( tableName, oldValues, self.table_keys, self.localMasterConn )
                     else:
-                        dbProcessor.doCallback( 'update', tableName, newValues, oldValues, self.table_keys )
+                        #dbProcessor.doCallback( 'update', tableName, newValues, oldValues, self.table_keys )
+                        pass
                 else:
                     dbProcessor.processUpdate( tableName, newValues, self.table_keys, self.localMasterConn )
             # del
             elif not newValues and oldValues:
                 dbProcessor.doDelete( tableName, oldValues, self.table_keys, self.localMasterConn )
-            else:
-                pass
             
-            self.processing_cnt -= 1
+            binlogProcessor.lock.acquire()
+            binlogProcessor.processed_cnt += 1
+            binlogProcessor.lock.release()
             
 class dbProcessor( object ):
     @classmethod
@@ -624,8 +635,6 @@ class dbProcessor( object ):
         #if PRIKeys == None:
         #    PRIKeys = self.getKeys( tb )
         #    self.table_keys[tb] = PRIKeys
-        print data
-        print PRIKeys
         
         condition = [(k, '=', v) for k, v in data.items() if k in PRIKeys]
         if extCondition:
@@ -729,13 +738,9 @@ class dbProcessor( object ):
                     combinedDict = combinDict( ( 'new', 'old' ), ( newValues, oldValues ) )
                     combinedDict['ACT'] = esql.formatvalue( act )
                     combinedDict['TABLE'] = esql.formatvalue( tb ) if type( tb ) in types.StringTypes else esql.formatvalue( '.'.join(tb) )
-                    
-                    import pprint
-                    pprint.pprint( combinedDict )
 
                     sql = sqlFormat %combinedDict
                     sql = sql
-                    print '|' * 30, sql
     
                     con.write( sql )
                 except Exception, e:
