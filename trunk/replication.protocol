@@ -1,4 +1,5 @@
-
+#(length)[arraylength]{args}
+# $arg : global variable
 binlog  BINLOG
     
     packet       PACKET
@@ -112,7 +113,7 @@ binlog  BINLOG
                         columns_count         packint
                         columns_type          uint[columns_count]
                         metadata_length       packint
-                        #metadata              byte[metadata_length]
+                        #metadata             byte[metadata_length]
                         metadata              metadata(metadata_length){columns_type}
                         nullable              bit[columns_count]
                     
