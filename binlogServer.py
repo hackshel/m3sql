@@ -336,10 +336,14 @@ class BinlogServer( object ):
 
     def processBinlog( self ):
         while True:
+            self.reConnected = False
             try:
                 for binlog in self.erep.readloop():
                     # just raise SlaveConnDisabled
                     self.duplicateToLocalMaster( binlog )
+                    
+                    if self.reConnected:
+                        break
             # when parse binlog, the table's info is not in tablemata, do not process
             except UnknownTableDefine, e:
                 print '[]' * 10, 'no table defin, ignore', str(e)
