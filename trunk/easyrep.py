@@ -101,6 +101,7 @@ class RowType( ezp.ProtocolType ):
         for i, c in enumerate(chrs) :
             r += ord(c) * ( 256**i )
             
+        # signed and negative   
         if ca == False and ord(chrs[-1]) & 128 :
             r -= 2**(len(chrs)*8)
             #pass
@@ -196,7 +197,7 @@ class RowType( ezp.ProtocolType ):
             for coltype, mdata, isnull, ca in cols :
                 
                 #_debug_l = l
-                
+                # isnull == 1,means the column's value is not changed
                 if isnull == 1 :
                     rr.append( None )
                     continue
@@ -232,6 +233,7 @@ class RowType( ezp.ProtocolType ):
                     else :
                         rr.append( _r )
                 elif coltype == 15 : # varchar
+                    # the length's length is in mdata
                     _r, l = self.readint(x,l,mdata)
                     _r, l = self.readchar(x,l,_r)
                     rr.append( _r )
@@ -312,7 +314,10 @@ class PACKINTType( ezp.ProtocolType ):
         return r, len(chrs)+1
         
 
-
+'''
+this element logged the element value's length which value's length is variable in this row
+accrod the element value's length to judge the value's length's length
+'''
 class METADATAType( ezp.ProtocolType ):
     
     def __init__( self ):
@@ -320,11 +325,13 @@ class METADATAType( ezp.ProtocolType ):
         self.name = 'metadata'
         self.cname = 'int *'
         
+        # identifiable : means the element can make sure length or not
+        # stretch : means the element's length can change more longer then given length
         self.identifiable = True
         self.stretch = True
         
         self.variables = []
-        
+
     def length( self, lens, array ):
         return None
     
@@ -334,10 +341,12 @@ class METADATAType( ezp.ProtocolType ):
         
         r = 0
         
+        # if bigend, reverse the chrs
         if bigend == True :
             chrs = list(chrs)
             chrs.reverse()
         
+        # change hex to int
         for i, c in enumerate(chrs) :
             r += ord(c) * ( 256**i )
             
@@ -408,12 +417,17 @@ class EasyReplication(object):
     COM_BINLOG_DUMP = 18
     
     ebp = ezp.EasyBinaryProtocol()
+    # add elemnt type for binlog
     ebp.buildintypes.append(RowType())
     ebp.buildintypes.append(PACKINTType())
     ebp.buildintypes.append(METADATAType())
     ebp.namespaces = dict( (bt.name, bt) for bt in ebp.buildintypes )
     ebp.parsefile( 'replication.protocol' )
     
+    '''
+    db : db option
+    location : logname, log start position and tablest
+    '''
     def __init__( self, db, location,
                         tablefilter=None, ):
         
@@ -423,10 +437,12 @@ class EasyReplication(object):
         
         self.logname, self.pos, self.tablest = location or (None,None,None)
         
+        # not get tablest when init, query from db when used
         if self.tablest == None :
             self.tablest = {}
             self.ebp.namespaces['rows'].sqlquery = self.executesqlone
         
+        # tablefilter maybe a function or tuple like (database name, table name)
         if type(tablefilter) == types.TupleType :
             
             if len(tablefilter) != 2 or tablefilter[0] == None :
@@ -698,6 +714,7 @@ class EasyReplication(object):
                     onconn(self.conn, self.logname, self.pos, self.tablest)
                 continue
             
+            # present binlog return next binlog position
             try :
                 self.run_pos = r['body']['content']['event']['header']['next_position']
             except :
@@ -710,6 +727,7 @@ class EasyReplication(object):
             except KeyError, e :
                 pass
             
+            # table info
             try :
                 coltype = r['body']['content']['event']['data']['table']['columns_type']
                 metadata = r['body']['content']['event']['data']['table']['metadata']
@@ -719,6 +737,7 @@ class EasyReplication(object):
             except KeyError, e :
                 pass
             
+            # when mster's binlog file rotate
             try :
                 rot = r['body']['content']['event']['data']['rotate']
                 self.logname, self.pos = rot['binlog'], rot['position']
@@ -727,6 +746,7 @@ class EasyReplication(object):
             except KeyError, e :
                 pass
             
+            # operation
             try :
                 op, d = r['body']['content']['event']['data'].items()[0]
             except KeyError, e :
@@ -737,6 +757,7 @@ class EasyReplication(object):
                 
                 _q = d['query'].strip().split()
                 qtype = [ q.lower() for q in _q[:2] ]
+                # q->qtype?
                 if q == ['create','table'] :
                     table = [ x.strip('`') for x in _q[3].split('.',1)]
                     table = [dbname] + table if dbname else table  
@@ -762,13 +783,16 @@ class EasyReplication(object):
             
             if op == 'write_rows' :
                 
+                # when multi-rows, only last row return the next postion
                 for x in d['value'][:-1] :
                     yield None, t, x, None
             
+                # (binlog_name, next position, tablelest), table name, after value(last row), before value
                 yield (self.logname, self.pos, self.tablest), t, d['value'][-1], None
             
             elif op == 'update_rows' :
-                
+                # when update, the value is [ before value, after value, before value, after value, .....]
+                # a couple of after and before operation for a row date
                 v = zip( d['value'][::2], d['value'][1::2] )
                 for b, a in v[:-1] :
                     yield None, t, a, b
