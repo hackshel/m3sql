@@ -62,7 +62,6 @@ class M3EasyReplication( easyrep.EasyReplication ):
         self.run_pos = self.pos
         
         while(True):
-            
             if evyield :
                 yield EventWait
             
@@ -78,7 +77,6 @@ class M3EasyReplication( easyrep.EasyReplication ):
                 if onconn != None :
                     onconn(self.conn, self.logname, self.pos, self.tablest)
                 continue
-            
             try :
                 self.run_pos = r['body']['content']['event']['header']['next_position']
             except :
@@ -94,6 +92,7 @@ class M3EasyReplication( easyrep.EasyReplication ):
             try :
                 coltype = r['body']['content']['event']['data']['table']['columns_type']
                 metadata = r['body']['content']['event']['data']['table']['metadata']
+                
                 idt[r['body']['content']['event']['data']['table']['table_id']] = \
                     (r['body']['content']['event']['data']['table']['dbname'],
                      r['body']['content']['event']['data']['table']['tablename'])
@@ -227,3 +226,12 @@ class M3EasyReplication( easyrep.EasyReplication ):
         conn = esql.ConnLite( pymysql.connect( **self.dbarg ) )
 
         return conn.getcols( tb )
+        
+    def getSlaveStatus( self ):
+        
+        if self.dbarg is None :
+            raise UnkownDBArgs, 'unkown db arg'
+
+        conn = esql.ConnLite( pymysql.connect( **self.dbarg ) )
+
+        return conn.getSlaveStatus()
