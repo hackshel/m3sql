@@ -30,6 +30,9 @@ def formatvalue( v ):
     if type(v) == datetime.datetime :
         return pymysql.escape_string( v.strftime('%Y-%m-%d %H:%M:%S') )
 
+    if type(v) in (types.TupleType, types.ListType):
+        return (','.join([formatvalue(vv) for vv in v])) .join(['(', ')'])
+
     return pymysql.escape_string((v))
 
 def formatcond( k, v ):
@@ -51,7 +54,6 @@ def makecond( condition ):
     
     if type(condition) in (types.TupleType, types.ListType ):
         condition = [' '.join((col.join(['`', '`']), oper, formatvalue(val))) for col, oper, val in condition]
-        
     elif type(condition) == types.DictType:
         condition = [ formatcond(k,v) for k, v in condition.items() ]
     
@@ -59,14 +61,19 @@ def makecond( condition ):
         raise EasySqlLiteException, 'Can not format condition'
     
     return " AND ".join(condition)
-
+    
+def makeComplexCond( condition ):
+    if type(condition) == types.TupleType:
+        col, oper, val = condition
+        return ' '.join((col.join(['`', '`']), oper, formatvalue(val)))
+    elif type(condition) == types.ListType:
+        return (' '.join([cond if type(cond) in types.StringTypes else makeComplexCond(cond) for cond in condition ])).join(['(', ')'])
 
 class ConnLite( object ):
 
     def __init__( self, conn ):
 
         self.conn = conn
-
 
     def read( self, sql ):
 
@@ -172,7 +179,7 @@ class ConnLite( object ):
 
         return self.puts( tb, [data], *args, **kwargs )
         
-    def update( self, tb, data, where=None ):
+    def update( self, tb, data, where=None, complex = False ):
         if data == {} :
             return
         tb = formattable( tb )
@@ -182,7 +189,10 @@ class ConnLite( object ):
         sql = "UPDATE %s SET %s" % ( tb, kvs, )
         
         if where:
-            sql = "%s WHERE %s" % ( sql, makecond(where), )
+            if complex:
+                sql = "%s WHERE %s" % ( sql, makeComplexCond(where), )
+            else:
+                sql = "%s WHERE %s" % ( sql, makecond(where), )
         
         print sql
         return self.write( sql, )
@@ -234,6 +244,10 @@ class ConnLite( object ):
     def getMasterStatus( self, ):
         
         return self.read( "SHOW MASTER STATUS" )
+        
+    def getSlaveStatus( self, ):
+        
+        return self.read( "SHOW SLAVE STATUS" )
         
     def getUptime( self, ):
 
