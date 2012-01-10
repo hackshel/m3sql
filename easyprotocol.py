@@ -26,6 +26,19 @@ class UndefinedValueInUnion( EasyBinaryProtocolError ):
 class ConnectionError( EasyBinaryProtocolError ):
     pass
 
+def argsplit( inp ):
+    
+    args = inp.split(',')
+    
+    cs = [ a.count('(') - a.count(')') for a in args ]
+    cs = [ sum(cs[:i+1]) for i in range(len(cs)) ]
+    
+    cs = [ i for i, c in enumerate(cs) if c == 0 ]
+    
+    args = [ ','.join(args[s+1:e+1]) for s, e in zip([-1]+cs, cs) ]
+    
+    return [ a.strip() for a in args ]
+
 def parse_expr( e ):
     
     if e == None :
@@ -49,12 +62,12 @@ def parse_expr( e ):
         m = re.match(r'%s\(%s\)' % (function, arguments), e)
         
         if m == None :
-            raise ParseSyntaxError, ( 'Line: %d %s' % (i,li) )
+            raise ParseSyntaxError, ( 'Line: %s' % (e,) )
         
         m = m.groupdict()
         
         f = m['function']
-        args = [ a.strip() for a in m['args'].split(',') ]
+        args = [ a.strip() for a in argsplit( m['args'] ) ]
         
         args = [ parse_expr(a) for a in args ]
         
@@ -91,9 +104,12 @@ def complength( e, vs, namespace ):
         return e[1]
     
     if t == 3 :
+        
         args = [ complength(a, vs, namespace) for a in e[1][1] ]
-        #print '@',e
-        return namespace[e[1][0]](*args)
+        try :
+            return namespace[e[1][0]](*args)
+        except KeyError, er:
+            raise KeyError, (er,namespace,e)
         
     if t == 4 :
         return namespace[e[1]]
@@ -125,7 +141,7 @@ class ProtocolType( object ):
         
         r = [ self.read( namespace, fp, lens, args ) for i in range(mlens) ]
         
-        r, le = zip( *r )
+        r, le = zip( *r ) if r else ([],[0])
         
         return r, sum(le)
 
@@ -155,7 +171,7 @@ class TypeStruct( ProtocolType ):
         return
         
     def read( self, namespace, fp, lens, args ):
-        
+
         r = {}
         
         l = 0
@@ -221,12 +237,21 @@ class TypeUnion( ProtocolType ):
         
         i = 0
         for m in members :
+            
             if 'seg' in m and m['seg']:
                 
                 if m['seg'] == '*:' :
                     self.defaultmember = m
                     continue
-                    
+                
+                if m['seg'] == 'true:' :
+                    self.members[True] = m
+                    continue
+                
+                if m['seg'] == 'false:' :
+                    self.members[False] = m
+                    continue
+                
                 keys = [ int(i) for i in m['seg'].strip(':').split(',') if i ]
                 for k in keys :
                     self.members[k] = m
@@ -256,7 +281,7 @@ class TypeUnion( ProtocolType ):
         m = self.members.get(args, self.defaultmember )
         
         if not m :
-            raise UndefinedValueInUnion, args
+            raise UndefinedValueInUnion, (self.name, args, self.members)
         
         if m['array'][0] == 0 : #None
             
@@ -310,7 +335,34 @@ class BuildinTypeUINT( ProtocolType ):
     def __init__( self ):
         
         self.name = 'uint'
-        self.cname = 'long'
+        self.cname = 'unsigned long'
+        
+        self.identifiable = True
+        self.stretch = False
+        
+        self.variables = []
+        
+    def length( self, lens, array ):
+        return lens*array
+        
+    def read( self, namespace, fp, lens, args ):
+
+        chrs = fp.read(lens)
+
+        r = 0
+        
+        for i, c in enumerate(chrs) :
+            r += ord(c) * ( 256**i )
+        
+        return r, lens
+        
+
+class BuildinTypeUINTB( ProtocolType ):
+    
+    def __init__( self ):
+        
+        self.name = 'uint_b'
+        self.cname = 'unsigned long'
         
         self.identifiable = True
         self.stretch = False
@@ -326,11 +378,45 @@ class BuildinTypeUINT( ProtocolType ):
         
         r = 0
         
+        chrs = list(chrs)
+        chrs.reverse()
+        
         for i, c in enumerate(chrs) :
             r += ord(c) * ( 256**i )
         
         return r, lens
         
+class BuildinTypeINTB( ProtocolType ):
+    
+    def __init__( self ):
+        
+        self.name = 'int_b'
+        self.cname = 'long'
+        
+        self.identifiable = True
+        self.stretch = False
+        
+        self.variables = []
+        
+    def length( self, lens, array ):
+        return lens*array
+        
+    def read( self, namespace, fp, lens, args ):
+        
+        chrs = fp.read(lens)
+        
+        chrs = list(chrs)
+        chrs.reverse()
+        
+        r = 0
+        c = 0
+        for i, c in enumerate(chrs) :
+            r += ord(c) * ( 256**i )
+        
+        if ord(c) >= 127 :
+            r = r - 256**(i+1)
+        
+        return r, lens
 
 class BuildinTypeCHAR( ProtocolType ):
     
@@ -413,8 +499,6 @@ class BuildinTypeBIT( ProtocolType ):
         
         s = fp.read( le )
         
-        #print '*'*20, s.encode('hex')
-        
         s = [ ( (ord(r)>>i) & 1 ) for r in s for i in range(8) ]
         
         return s[:mlens], le
@@ -429,9 +513,12 @@ class SafeIO( object ):
         self.io = io
         
     def read( self, lens ):
+
         r = self.io.read(lens)
+
         if len(r) != lens :
             raise ConnectionError, 'Connection Error'
+
         return r
         
         
@@ -442,16 +529,37 @@ class EasyBinaryProtocol( object ):
                      BuildinTypeUINT(),
                      BuildinTypeBYTE(),
                      BuildinTypeBIT(),
+                     BuildinTypeINTB(),
+                     BuildinTypeUINTB(),
                    ]
+    
+    buildinfunction = [ ( 'add', (lambda a, b: a+b) ),
+                        ( 'sub', (lambda a, b: a-b) ),
+                        ( 'mul', (lambda a, b: a*b) ),
+                        ( 'div', (lambda a, b: a/b) ),
+                        ( 'mod', (lambda a, b: a%b) ),
+                        ( 'first', (lambda a : a[0]) ),
+                        ( 'last', (lambda a: a[-1]) ),
+                        ( 'max', max ),
+                        ( 'min', min ),
+                        ( 'tuple', (lambda *args : args) ),
+                        ( 'ge', (lambda a, b: a>=b ) ),
+                        ( 'le', (lambda a, b: a<=b ) ),
+                        ( 'gt', (lambda a, b: a>b ) ),
+                        ( 'lt', (lambda a, b: a<b ) ),
+                        ( 'true', True ),
+                        ( 'false', False ),
+                      ]
     
     def __init__( self ):
         
-        seg = r'(?P<seg>[0-9,*]*:)'
+        seg = r'(?P<seg>([0-9,*]*|true|false):)'
         var = r'(?P<var>[a-zA-Z_]\w*)'
         name = r'(?P<name>[a-zA-Z_]\w*)'
         length = r'\((?P<length>\s*\S+?\s*)\)'
         array = r'\[(?P<array>\s*\S+\s*)\]'
-        arg = r'\{(?P<arg>\s*\S+\s*)\}'
+        #arg = r'\{(?P<arg>\s*\S+\s*)\}'
+        arg = r'\{(?P<arg>.*)\}'
 
         self.pat = '%s?%s\s+%s(%s)?(%s)?(%s)?' % (seg,var, name, length, array, arg)
         
@@ -459,6 +567,12 @@ class EasyBinaryProtocol( object ):
         self.p_globals = {}
         
         self.buildintypes = self.buildintypes[:]
+    
+    def rebuild_namespaces( self ):
+        self.namespaces = dict( (bt.name, bt) for bt in self.buildintypes )
+        #for k, v in self.buildinfunction :
+        #    self.namespaces[k] = v
+        #print 'NS:', self.namespaces
     
     def parsefile( self, fname ):
         
@@ -479,7 +593,7 @@ class EasyBinaryProtocol( object ):
     
     def _parse( self, defines ):
     
-        for define in defines : 
+        for define in defines :
             self._parsedefine( define )
             declaration = define[1].copy()
             v = declaration.pop('var')
@@ -565,7 +679,8 @@ class EasyBinaryProtocol( object ):
         v = self.p_globals[name]
         stt = self.namespaces[v['name']]
         
-        spaces['tuple'] = lambda *args : args
+        for k, bif in self.buildinfunction :
+            spaces.setdefault(k,bif)
         
         return stt.read( spaces, SafeIO(io), v['length'], v['array'] )[0]
         
